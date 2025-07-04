@@ -3,193 +3,465 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Chat ẩn danh</title>
+  <title>Anonymous Chat</title>
+  
   <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+  
   <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.20.6/babel.min.js"></script>
+  
   <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.5.1/dist/socket.io.min.js"></script>
+  
   <script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.0/simplepeer.min.js"></script>
+  
   <script src="https://cdn.tailwindcss.com"></script>
+  
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  
+  <style>
+    /* Base font for the body */
+    body {
+      font-family: 'Poppins', sans-serif;
+      overflow: hidden; /* Prevent body scroll, let specific divs handle scroll */
+    }
+
+    /* Custom Scrollbar Styling for Chat Messages */
+    .scrollable-messages {
+      scrollbar-width: thin; /* Firefox */
+      scrollbar-color: #A78BFA #1F2937; /* thumb color, track color */
+    }
+    /* Webkit (Chrome, Safari) scrollbar styles */
+    .scrollable-messages::-webkit-scrollbar {
+      width: 8px; /* Width of the scrollbar */
+    }
+    .scrollable-messages::-webkit-scrollbar-track {
+      background: #1F2937; /* Dark background for the track */
+      border-radius: 10px;
+    }
+    .scrollable-messages::-webkit-scrollbar-thumb {
+      background-color: #A78BFA; /* Purple for the thumb */
+      border-radius: 10px;
+      border: 2px solid #1F2937; /* Border around the thumb */
+    }
+
+    /* Glowing Border Animation */
+    @keyframes pulse-border {
+      0% {
+        box-shadow: 0 0 0px rgba(167, 139, 250, 0.7); /* purple-400 */
+      }
+      50% {
+        box-shadow: 0 0 15px rgba(167, 139, 250, 0.9), 0 0 25px rgba(139, 92, 246, 0.6); /* purple-400, purple-500 */
+      }
+      100% {
+        box-shadow: 0 0 0px rgba(167, 139, 250, 0.7);
+      }
+    }
+
+    .glowing-border {
+      animation: pulse-border 2.5s infinite alternate; /* Apply the animation */
+    }
+
+    /* Typing Indicator Dots Animation */
+    @keyframes blink {
+      0% { opacity: .2; }
+      20% { opacity: 1; }
+      100% { opacity: .2; }
+    }
+    .typing span {
+      animation-name: blink;
+      animation-duration: 1.4s;
+      animation-iteration-count: infinite;
+      animation-fill-mode: both;
+    }
+    .typing span:nth-child(2) {
+      animation-delay: .2s;
+    }
+    .typing span:nth-child(3) {
+      animation-delay: .4s;
+    }
+  </style>
 </head>
 <body>
   <div id="root"></div>
-  <script type="text/babel">
-    function App() {
-      const [messages, setMessages] = React.useState([]);
-      const [input, setInput] = React.useState('');
-      const [isConnected, setIsConnected] = React.useState(false);
-      const [isFinding, setIsFinding] = React.useState(false);
-      const [onlineUsers, setOnlineUsers] = React.useState(0);
-      const fileInputRef = React.useRef(null);
-      const messagesEndRef = React.useRef(null);
 
-      const peerRef = React.useRef(null); // Thêm dòng này
+  <script type="text/babel">
+    // Constants for typing indicator timeout
+    const ACTIVITY_TIMEOUT = 1500; // Time in ms to clear typing indicator
+
+    function App() {
+      // State variables
+      const [messages, setMessages] = React.useState([]); // Stores all chat and activity messages
+      const [input, setInput] = React.useState(''); // Current input field value
+      const [isConnected, setIsConnected] = React.useState(false); // True if connected to a stranger
+      const [isFinding, setIsFinding] = React.useState(true); // True if actively searching for a stranger
+      const [onlineUsers, setOnlineUsers] = React.useState(0); // Count of users online
+      const [strangerIsTyping, setStrangerIsTyping] = React.useState(false); // True if stranger is typing
+
+      // Refs for DOM elements
+      const typingTimeoutRef = React.useRef(null); // Timeout ID for clearing typing indicator
+      const fileInputRef = React.useRef(null); // Reference to hidden file input
+      const messagesEndRef = React.useRef(null); // Reference to the end of messages div for scrolling
+
+      // WebRTC SimplePeer instance reference
+      const peerRef = React.useRef(null); 
+      
+      // Socket.IO client instance, memoized to avoid re-creation
       const socket = React.useMemo(() => io('https://anonymouschat-server.onrender.com'), []);
 
+      // Helper function to add activity/system messages
+      const addActivityMessage = (content) => {
+        setMessages((prev) => [...prev, { type: 'activity', content: content, timestamp: Date.now() }]);
+      };
+
+      // Main effect hook for socket and peer events
       React.useEffect(() => {
+        // Socket.IO connection event
         socket.on('connect', () => {
           console.log('Connected to signaling server');
+          // Automatically start finding a stranger when connected to the server
+          findStranger(); 
         });
 
+        // Event to update online user count
         socket.on('onlineUsers', (count) => {
           setOnlineUsers(count);
         });
 
+        // Event when a match is found with another user
         socket.on('matched', (data) => {
+          // If we were already connected (e.g., previous stranger left),
+          // notify and clean up before connecting to a new one
+          if (isConnected) {
+            addActivityMessage('Stranger disconnected. Searching for a new connection...');
+            if (peerRef.current) {
+              peerRef.current.destroy(); // Destroy previous peer connection
+              peerRef.current = null;
+            }
+          }
+          
+          setIsConnected(false); // Reset connection state
+          setStrangerIsTyping(false); // Reset typing indicator
+          if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current); // Clear any pending typing timeout
+          setMessages([]); // Clear all previous messages for a fresh chat
+
+          // Create a new SimplePeer instance
           const newPeer = new SimplePeer({
-            initiator: data.initiator,
-            trickle: false,
+            initiator: data.initiator, // 'true' if we initiate the connection, 'false' if we respond
+            trickle: false, // Don't use ICE trickle (send all candidates at once)
           });
 
+          // Handle WebRTC signaling data
           newPeer.on('signal', (signal) => {
+            // Send signaling data to the other peer via the signaling server
             socket.emit('signal', { signal, to: data.peerId });
           });
 
+          // Handle peer connection established
           newPeer.on('connect', () => {
-            setIsConnected(true);
-            setIsFinding(false);
-            setMessages((prev) => [...prev, { type: 'system', content: 'Connected to stranger!' }]);
+            setIsConnected(true); // Update connection status
+            setIsFinding(false); // Stop finding
+            addActivityMessage('Stranger joined the chat. Say hi!'); // Notify user
           });
 
+          // Handle incoming data from the peer
           newPeer.on('data', (data) => {
-            const message = JSON.parse(data);
-            setMessages((prev) => [...prev, { ...message, from: 'stranger' }]);
+            const message = JSON.parse(data); // Parse the incoming JSON message
+
+            if (message.type === 'typing') {
+              // If it's a typing indicator message
+              setStrangerIsTyping(true); // Show typing indicator
+              if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current); // Clear previous timeout
+              // Set a new timeout to hide typing indicator after a delay
+              typingTimeoutRef.current = setTimeout(() => {
+                setStrangerIsTyping(false);
+              }, ACTIVITY_TIMEOUT);
+            } else {
+              // If it's a regular chat message (text, image, video)
+              setStrangerIsTyping(false); // Hide typing indicator
+              if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current); // Clear any pending timeout
+              setMessages((prev) => [...prev, { ...message, from: 'stranger', timestamp: Date.now() }]);
+            }
           });
 
+          // Handle peer connection closed
+          newPeer.on('close', () => {
+            console.log('Peer closed');
+            setIsConnected(false); // Update connection status
+            setIsFinding(true); // Start finding a new stranger automatically
+            addActivityMessage('Stranger left the chat. Finding a new connection...'); // Notify user
+            setStrangerIsTyping(false); // Clear typing indicator
+            if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+            peerRef.current = null; // Clear peer reference
+            findStranger(); // Initiate finding a new stranger
+          });
+
+          // Handle peer connection error
           newPeer.on('error', (err) => {
             console.error('Peer error:', err);
-            setMessages((prev) => [...prev, { type: 'system', content: 'Connection lost. Try finding a new stranger.' }]);
             setIsConnected(false);
+            setIsFinding(true);
+            addActivityMessage('Connection lost. Finding a new connection...');
+            setStrangerIsTyping(false);
+            if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
             peerRef.current = null;
+            findStranger();
           });
 
-          peerRef.current = newPeer; // Lưu peer vào ref
+          peerRef.current = newPeer; // Store the new peer instance in the ref
         });
 
+        // Handle incoming signaling data for an existing peer
         socket.on('signal', (data) => {
-          if (peerRef.current) {
-            peerRef.current.signal(data.signal);
+          if (peerRef.current && !peerRef.current.destroyed) {
+            peerRef.current.signal(data.signal); // Apply received signal to the peer
           }
         });
 
+        // Cleanup function for useEffect (runs on component unmount or dependencies change)
         return () => {
-          socket.disconnect();
-          if (peerRef.current) peerRef.current.destroy();
+          socket.disconnect(); // Disconnect from Socket.IO server
+          if (peerRef.current) peerRef.current.destroy(); // Destroy WebRTC peer connection
+          if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current); // Clear any typing timeouts
         };
-      }, []);
+      }, []); // Empty dependency array means this effect runs once on mount
 
+      // Effect hook for auto-scrolling to the latest message
       React.useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-      }, [messages]);
+      }, [messages, strangerIsTyping]); // Scroll whenever messages or typing status changes
 
+      // Function to initiate finding a stranger
       const findStranger = () => {
         setIsFinding(true);
         setIsConnected(false);
-        setMessages([]);
+        setStrangerIsTyping(false);
+        setMessages([]); // Clear messages for a clean start
         if (peerRef.current) {
-          peerRef.current.destroy();
+          peerRef.current.destroy(); // Destroy any existing peer connection
           peerRef.current = null;
         }
-        socket.emit('find-stranger');
+        addActivityMessage('Searching for a stranger...'); // Display activity message
+        socket.emit('find-stranger'); // Emit event to signaling server
       };
 
+      // Function to send a text message
       const sendMessage = () => {
         if (input.trim() && peerRef.current && isConnected) {
-          const message = { type: 'text', content: input, from: 'you' };
-          peerRef.current.send(JSON.stringify(message));
-          setMessages((prev) => [...prev, message]);
-          setInput('');
+          const message = { type: 'text', content: input, from: 'you', timestamp: Date.now() };
+          peerRef.current.send(JSON.stringify(message)); // Send message via WebRTC
+          setMessages((prev) => [...prev, message]); // Add message to local state
+          setInput(''); // Clear input field
+          
+          // Also send a 'not typing' indicator after sending a message
+          if (peerRef.current && peerRef.current.connected) {
+            peerRef.current.send(JSON.stringify({ type: 'typing', isTyping: false }));
+          }
         }
       };
 
+      // Function to handle file uploads (images/videos)
       const handleFileUpload = (e) => {
-        const file = e.target.files[0];
+        const file = e.target.files[0]; // Get the selected file
         if (file && peerRef.current && isConnected) {
-          const reader = new FileReader();
+          // Check file size limit (5MB)
+          if (file.size > 5 * 1024 * 1024) { 
+            addActivityMessage('File is too large! Max 5MB allowed.');
+            e.target.value = null; // Clear the file input
+            return;
+          }
+
+          addActivityMessage('You are sharing a file...'); // Notify user about file sharing
+          const reader = new FileReader(); // Create a FileReader to read the file
           reader.onload = () => {
             const message = {
-              type: file.type.startsWith('image') ? 'image' : 'video',
-              content: reader.result,
+              type: file.type.startsWith('image') ? 'image' : 'video', // Determine file type
+              content: reader.result, // Base64 encoded file data
               from: 'you',
+              fileName: file.name, // Include original file name
+              timestamp: Date.now(),
             };
-            peerRef.current.send(JSON.stringify(message));
-            setMessages((prev) => [...prev, message]);
+            peerRef.current.send(JSON.stringify(message)); // Send file data via WebRTC
+            setMessages((prev) => [...prev, message]); // Add file message to local state
           };
-          reader.readAsDataURL(file);
+          reader.readAsDataURL(file); // Read file as Data URL (Base64)
+        }
+        e.target.value = null; // Clear the file input to allow uploading the same file again
+      };
+
+      // Handles input field changes and sends typing indicators
+      const handleInputChange = (e) => {
+        setInput(e.target.value);
+        // Send typing indicator to the stranger if connected
+        if (peerRef.current && peerRef.current.connected) {
+          peerRef.current.send(JSON.stringify({ type: 'typing', isTyping: e.target.value.length > 0 }));
         }
       };
 
+      // Handles Enter key press in the input field to send message
       const handleKeyPress = (e) => {
-        if (e.key === 'Enter') sendMessage();
+        if (e.key === 'Enter' && input.trim()) { // Only send if Enter is pressed and input is not empty
+          sendMessage();
+        }
+      };
+
+      // Formats timestamp into a human-readable time string
+      const formatTime = (timestamp) => {
+        const date = new Date(timestamp);
+        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       };
 
       return (
-        <div className="flex flex-col h-screen bg-gray-100">
-          <div className="bg-blue-600 text-white p-4 text-center">
-            <h1 className="text-2xl font-bold">Chat ẩn danh</h1>
-            <p>Trò chuyện với người lạ ngẫu nhiên. Không có tài khoản, không có nhật ký.</p>
-            <p className="mt-2">Users online: {onlineUsers}</p>
+        <div className="flex flex-col h-screen bg-gray-950 text-gray-100">
+          {/* Header Section */}
+          <div className="bg-gradient-to-r from-gray-800 to-gray-900 text-white p-4 shadow-xl">
+            <h1 className="text-3xl font-extrabold text-center tracking-wide text-purple-400">AnonyChat</h1>
+            <p className="text-md text-center opacity-80 mt-1">Anonymous & Instant Chat</p>
+            <p className="text-sm text-center mt-2 opacity-70">Users online: <span className="font-semibold text-purple-300">{onlineUsers}</span></p>
           </div>
-          <div className="flex-1 overflow-y-auto p-4">
+
+          {/* Chat Area - Main content with glowing border */}
+          <div className="flex-1 flex flex-col p-4 space-y-3 overflow-y-auto scrollable-messages bg-gray-800 bg-opacity-70 mx-4 my-2 rounded-2xl shadow-inner glowing-border">
+            {/* Loading/Finding Stranger State */}
+            {isFinding && (
+              <div className="flex flex-col items-center justify-center h-full text-center text-gray-400 text-lg">
+                <svg className="animate-spin h-12 w-12 text-purple-400 mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <p>Establishing connection...</p>
+                <p className="text-sm mt-1 opacity-80">Searching for a new stranger.</p>
+              </div>
+            )}
+
+            {/* No chat history yet, but not actively finding (e.g., initial state before first match) */}
+            {!isFinding && messages.length === 0 && !isConnected && (
+              <div className="flex flex-col items-center justify-center h-full text-center text-gray-400 text-lg">
+                <p>No active conversation.</p>
+                <p className="text-sm mt-1 opacity-80">A stranger should connect shortly!</p>
+              </div>
+            )}
+            
+            {/* Display Chat Messages */}
             {messages.map((msg, index) => (
               <div
                 key={index}
-                className={`mb-2 p-2 rounded-lg ${
-                  msg.from === 'you' ? 'bg-blue-200 ml-auto' : msg.from === 'stranger' ? 'bg-gray-200' : 'bg-yellow-200 text-center'
-                } max-w-md`}
+                // Align messages based on sender
+                className={`flex ${
+                  msg.from === 'you' ? 'justify-end' : 
+                  msg.from === 'stranger' ? 'justify-start' : 
+                  'justify-center' // For activity messages
+                }`}
               >
-                {msg.type === 'text' && <p>{msg.content}</p>}
-                {msg.type === 'image' && <img src={msg.content} alt="Shared" className="max-w-full h-auto" />}
-                {msg.type === 'video' && (
-                  <video controls className="max-w-full h-auto">
-                    <source src={msg.content} />
-                  </video>
-                )}
+                <div
+                  className={`p-3 text-sm shadow-lg relative 
+                    ${msg.from === 'you' 
+                      ? 'bg-purple-600 text-white rounded-3xl rounded-br-none' // Your messages
+                      : msg.from === 'stranger' 
+                      ? 'bg-gray-700 text-gray-100 rounded-3xl rounded-bl-none' // Stranger's messages
+                      : 'bg-gray-700 text-gray-300 px-4 py-2 text-center text-xs italic opacity-80 rounded-full' // Activity messages
+                    } 
+                    max-w-xs md:max-w-md break-words`}
+                >
+                  {/* Render different message types */}
+                  {msg.type === 'text' && <p>{msg.content}</p>}
+                  {msg.type === 'image' && (
+                    <>
+                      <img 
+                        src={msg.content} 
+                        alt="Shared" 
+                        className="max-w-full h-auto rounded-lg shadow-md cursor-pointer transition-transform duration-300 hover:scale-105 mb-1" 
+                        onClick={() => window.open(msg.content, '_blank')} // Open image in new tab on click
+                      />
+                      <p className="text-xs text-gray-300 opacity-70 mt-1">{msg.fileName}</p>
+                    </>
+                  )}
+                  {msg.type === 'video' && (
+                    <>
+                      <video 
+                        controls 
+                        className="max-w-full h-auto rounded-lg shadow-md mb-1"
+                      >
+                        <source src={msg.content} />
+                        Your browser does not support the video tag.
+                      </video>
+                      <p className="text-xs text-gray-300 opacity-70 mt-1">{msg.fileName}</p>
+                    </>
+                  )}
+                  {/* Timestamp for actual chat messages */}
+                  {msg.type !== 'activity' && (
+                    <span className={`absolute bottom-1 text-[0.6rem] opacity-60 
+                      ${msg.from === 'you' ? 'left-3 text-purple-200' : 'right-3 text-gray-400'}`}>
+                      {formatTime(msg.timestamp)}
+                    </span>
+                  )}
+                </div>
               </div>
             ))}
+            
+            {/* Stranger is Typing Indicator */}
+            {strangerIsTyping && (
+              <div className="flex justify-start">
+                <div className="bg-gray-700 text-gray-300 p-3 rounded-3xl rounded-bl-none shadow-lg max-w-xs md:max-w-md">
+                  <span className="typing">
+                    <span>.</span><span>.</span><span>.</span>
+                  </span>
+                </div>
+              </div>
+            )}
+            {/* Dummy div to scroll to the bottom */}
             <div ref={messagesEndRef} />
           </div>
-          <div className="p-4 bg-white border-t">
-            {!isConnected && !isFinding && (
-              <button
-                onClick={findStranger}
-                className="w-full bg-blue-600 text-white p-2 rounded hover:bg-blue-700"
-              >
-                Tìm một người lạ
-              </button>
-            )}
-            {isFinding && (
-              <p className="text-center text-gray-600">Tìm một người lạ...</p>
-            )}
-            {isConnected && (
-              <div className="flex space-x-2">
+
+          {/* Input and Action Area */}
+          <div className="p-4 bg-gray-800 border-t border-gray-700 shadow-xl flex items-center space-x-3 mx-4 mb-2 rounded-2xl">
+            {isConnected ? (
+              <>
+                {/* Message Input Field */}
                 <input
                   type="text"
                   value={input}
-                  onChange={(e) => setInput(e.target.value)}
+                  onChange={handleInputChange}
                   onKeyPress={handleKeyPress}
-                  className="flex-1 p-2 border rounded"
-                  placeholder="Type a message..."
+                  className="flex-1 p-3 border border-gray-600 rounded-full bg-gray-900 text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all duration-200 text-sm"
+                  placeholder="Type your message..."
+                  disabled={!isConnected}
                 />
+                {/* Send Button */}
                 <button
                   onClick={sendMessage}
-                  className="bg-blue-600 text-white p-2 rounded hover:bg-blue-700"
+                  className="bg-purple-600 text-white p-3 rounded-full hover:bg-purple-700 transition-colors duration-200 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                  disabled={!isConnected || !input.trim()}
+                  title="Send Message"
                 >
-                  Send
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                  </svg>
                 </button>
+                {/* Hidden File Input */}
                 <input
                   type="file"
                   accept="image/*,video/*"
                   ref={fileInputRef}
                   onChange={handleFileUpload}
                   className="hidden"
+                  disabled={!isConnected}
                 />
+                {/* Upload Button */}
                 <button
                   onClick={() => fileInputRef.current.click()}
-                  className="bg-gray-600 text-white p-2 rounded hover:bg-gray-700"
+                  className="bg-gray-600 text-white p-3 rounded-full hover:bg-gray-700 transition-colors duration-200 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                  disabled={!isConnected}
+                  title="Share Image or Video (Max 5MB)"
                 >
-                  Upload
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                  </svg>
                 </button>
+              </>
+            ) : (
+              // Message when not connected
+              <div className="flex-1 text-center text-gray-400 text-md py-2">
+                {isFinding ? "Searching for a new connection..." : "Disconnected. Refresh to chat again."}
               </div>
             )}
           </div>
@@ -197,6 +469,7 @@
       );
     }
 
+    // Render the App component into the root div
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<App />);
   </script>
